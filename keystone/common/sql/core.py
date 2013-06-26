@@ -51,6 +51,8 @@ OperationalError = sql.exc.OperationalError
 NotFound = sql.orm.exc.NoResultFound
 Boolean = sql.Boolean
 Text = sql.Text
+BigInt=sql.BIGINT
+Enum=sql.Enum
 UniqueConstraint = sql.UniqueConstraint
 
 

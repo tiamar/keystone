@@ -103,7 +103,7 @@ class HistoryResourcesModel(sql.ModelBase):
 class HistoryQuotasModel(sql.ModelBase):
     __tablename__ = 'h_quotas'
     id = sql.Column(sql.String(64), primary_key=True)
-    resource_id = sql.Column(sql.String(64), sql.ForeignKey('quotas.id'),
+    quota_id = sql.Column(sql.String(64), sql.ForeignKey('quotas.id'),
                              nullable=False)
     updated_at = sql.Column(sql.DateTime, nullable=False)
     updated_by = sql.Column(sql.Text, nullable=False)
@@ -125,12 +125,20 @@ class Resources(sql.Base):
         """ Registers a resource in the quota manager
         """
         if((type(parameters) is not list)):
-            raise Exception(('parameters should be a list'))
+            raise TypeError(('parameters should be a list'))
         if (type(created_by) is not dict):
-            raise Exception(('created_by should be a dictionary'))
+            raise TypeError(('created_by should be a dictionary'))
         session = self.get_session()
         with session.begin():
-            ref = ResourcesModel(str(uuid.uuid4()),
+            # Check no resource should exist with name resource_name
+            ref = session.query(ResourcesModel.name)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+            result = ref.all()
+            if (len(result) == 0):
+                # i.e. resource is not registered
+                # so, register it!
+                ref = ResourcesModel(str(uuid.uuid4()),
                            resource_name,
                            cPickle.dumps(parameters),
                            cPickle.dumps(child_identity),
@@ -138,8 +146,10 @@ class Resources(sql.Base):
                            purge_quota_after,
                            datetime.datetime.now(),
                            cPickle.dumps(created_by))
-            session.add(ref)
-            session.flush()
+                session.add(ref)
+                session.flush()
+            else:
+                raise Exception('resource is already registered')
         return
 
     def deregister_resource(self, resource_name, parameters, child_identity,
@@ -148,6 +158,42 @@ class Resources(sql.Base):
             All the corresponding quotas are also deleted
         """
 
+        return
+
+    def update_resource(self, resource_name, parameters, child_identity,
+                            resource_type, purge_quota_after):
+        """ Updates a resource related fields in the quota manager.
+        """
+
+        return
+
+    def get_resource_details(self, resource_name):
+        session = self.get_session()
+        ref = session.query(ResourcesModel)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+        result = ref.one()
+        resource_details = {}
+        resource_details["name"] = resource_name
+        resource_details["parameters"] = cPickle.loads(str(result.parameters))
+        resource_details["child_identity"] = cPickle\
+                                             .loads(str(result.child_identity))
+        resource_details["resource_type"] = str(result.type)
+        resource_details["purge_quota_after"] = result.purge_quota_after
+        resource_details["created_at"] = result.created_at
+        resource_details["created_by"] = cPickle.loads(str(result.created_by))
+        return resource_details
+
+    def get_parameters(self, resource_name):
+        return
+
+    def get_child_identity(self, resource_name):
+        return
+
+    def get_resource_type(self, resource_name):
+        return
+
+    def get_purge_quota_after(self, resource_name):
         return
 
     def get_resource_list(self, service_name):
@@ -160,124 +206,224 @@ class Resources(sql.Base):
 
 
 class Quotas(sql.Base):
-    def set_quota(self, resource_name, ceiling, child_data, parent_data,
-                   created_by):
+    def __get_quota_ids_for_child(self, child_data, service,
+                                resource=None,
+                                get_only_query=False):
         if(type(child_data) is not dict):
-            raise Exception(('child_data should be a dictionary'))
-        if(type(parent_data) is not dict):
-            raise Exception(('parent_data should be a dictionary'))
-        if(type(created_by) is not dict):
-            raise Exception(('created_by should be a dictionary'))
-
+            raise TypeError('child_data should be a dictionary')
+        if((type(service) is not str) & (type(service) is not list)):
+            raise TypeError('service should be either string or list')
         session = self.get_session()
         with session.begin():
-            #First check whether quota for the child already exist or not
-            for key in child_data:
-                oneKey = key
-                oneValue = child_data[key]
-                break
-            ''' this subquery is for getting list of existing quota_ids
-            corresponding to one of the key value pair in child_data. '''
-            subquery = session.query(ChildFieldDataModel.quota_id).filter(and_
-                        (ChildFieldDataModel.quota_id == QuotasModel.id,
-                        QuotasModel.resource_id == ResourcesModel.id,
-                        ResourcesModel.name == resource_name,
-                        ChildFieldDataModel.key == oneKey,
-                        ChildFieldDataModel.value == oneValue))
-            initial_query = session.query(ChildFieldDataModel.quota_id,
-                                   func.count(ChildFieldDataModel.quota_id).\
-                                   label('count'))
             key_value_match = []
             for key in child_data:
                 key_value_match.append(expression.\
                     and_(ChildFieldDataModel.key == key,
                         ChildFieldDataModel.value == child_data[key]))
-            query = initial_query.filter(or_(*key_value_match)).\
-                        filter(ChildFieldDataModel.quota_id.in_(subquery)).\
-                        group_by(ChildFieldDataModel.quota_id)
-            result = query.one()
-            if (result.count == len(child_data)):
-                raise Exception('quota already exist')
-            result = session.query(ResourcesModel.id).\
-                        filter(ResourcesModel.name == resource_name).one()
-            resource_id = result.id
+            resource_match = []
+            if (resource is None):
+                if (type(service) is str):
+                    resource_match.append(ResourcesModel.name.like
+                                          (service + ".%"))
+                else:
+                    for one_service in service:
+                        resource_match.append(ResourcesModel.name.like
+                                              (one_service + ".%"))
+            else:
+                resource_match.append(ResourcesModel.name ==
+                                      (service + "." + resource))
+            subquery = session.query(ChildFieldDataModel.quota_id).filter(and_
+                        (ChildFieldDataModel.quota_id == QuotasModel.id,
+                        QuotasModel.resource_id == ResourcesModel.id))\
+                        .filter(or_(*resource_match))\
+                        .filter(or_(*key_value_match))\
+                        .filter(QuotasModel.closed_at == None)\
+                        .filter(ResourcesModel.closed_at == None)\
+                        .group_by(ChildFieldDataModel.quota_id)\
+                        .having(func.count(ChildFieldDataModel.quota_id)\
+                               == len(child_data))
 
-            refQ = QuotasModel(str(uuid.uuid4()),
+            query = session.query(ChildFieldDataModel.quota_id)\
+                        .filter(ChildFieldDataModel.quota_id.in_(subquery))\
+                        .group_by(ChildFieldDataModel.quota_id)\
+                        .having(func.count(ChildFieldDataModel.quota_id)\
+                               == len(child_data))
+            if (get_only_query):
+                return query
+            result = query.all()
+            quota_id_list = []
+            for res in result:
+                quota_id_list.append(str(res.quota_id))
+        return quota_id_list
+
+    def set_quota(self, resource_name, ceiling, child_data, parent_data,
+                   created_by, remark=None, update_if_exist=True):
+        if(type(child_data) is not dict):
+            raise TypeError(('child_data should be a dictionary'))
+        if(type(parent_data) is not dict):
+            raise TypeError(('parent_data should be a dictionary'))
+        if(type(created_by) is not dict):
+            raise TypeError(('created_by should be a dictionary'))
+        if(type(resource_name) is not str):
+            raise TypeError(('resource_name should be a string'))
+        service_resource_split = resource_name.split('.')
+        if (len(service_resource_split) != 2):  # TODO Regex Check
+            raise ValueError('resource_name is not correctly formatted')
+        service = service_resource_split[0]
+        resource = service_resource_split[1]
+
+        session = self.get_session()
+        with session.begin():
+            # First check whether quota for the child already exist or not
+            quota_ids = self.__get_quota_ids_for_child(child_data,
+                                                     service, resource)
+            if (len(quota_ids) != 0):  # record for quota exist
+                if(update_if_exist == True):
+                    # so update the existing record
+                    # First : Check whether given parent is allowed to update
+                    refP = session.query(ParentFieldDataModel.key,
+                                         ParentFieldDataModel.value)\
+                    .filter(ParentFieldDataModel.quota_id == quota_ids[0])
+                    result = refP.all()
+                    for res in result:
+                        if ((res.key in parent_data) and
+                            (parent_data[res.key] == res.value)):
+                            continue
+                        else:
+                            raise Exception("given parent can't update quota")
+
+                    result = session.query(QuotasModel.ceiling)\
+                             .filter(id == quota_ids[0])\
+                             .one()
+
+                    if (remark == None):
+                        remark = ""
+
+                    historyRemark = "ceiling: "\
+                                    + str(result.ceiling)\
+                                    + "->"\
+                                    + str(ceiling)\
+                                    + ". "\
+                                    + remark
+                    # Update the record
+                    session.query(QuotasModel)\
+                    .filter(id == quota_ids[0])\
+                    .update({"ceiling": ceiling})
+                    # Create a history record for the same
+                    ref = HistoryQuotasModel(str(uuid.uuid4()),
+                              quota_id=quota_ids[0],
+                              updated_at=datetime.datetime.now(),
+                              updated_by=cPickle.dumps(created_by),
+                              remark=historyRemark)
+                    session.add(ref)
+                    session.commit()
+                else:
+                    return None
+            else:
+                result = session.query(ResourcesModel.id)\
+                        .filter(ResourcesModel.name == resource_name)\
+                        .filter(ResourcesModel.closed_at == None)\
+                        .one()
+                resource_id = result.id
+
+                refQ = QuotasModel(str(uuid.uuid4()),
                            resource_id=resource_id,
                            ceiling=ceiling,
                            available=-1,
                            created_at=datetime.datetime.now(),
                            created_by=cPickle.dumps(created_by))
-            session.add(refQ)
-            quota_id = refQ.id
-            #quota_id will be used for child field data and parent field data
+                session.add(refQ)
+                quota_id = refQ.id
 
-            for key in child_data:
-                refC = ChildFieldDataModel(id=str(uuid.uuid4()),
+                for key in child_data:
+                    refC = ChildFieldDataModel(id=str(uuid.uuid4()),
                                         quota_id=quota_id,
                                         key=key,
                                         value=child_data[key])
-                session.add(refC)
+                    session.add(refC)
 
-            for key in parent_data:
-                refC = ParentFieldDataModel(id=str(uuid.uuid4()),
+                for key in parent_data:
+                    refC = ParentFieldDataModel(id=str(uuid.uuid4()),
                                         quota_id=quota_id,
                                         key=key,
                                         value=parent_data[key])
-                session.add(refC)
-            session.flush()
-        return
+                    session.add(refC)
+                session.commit()
+                service_list = []
+                service_list.append(service)
+        return self.get_quota_by_services(service_list, child_data)
 
-    def get_quota(self, resource_name, child_data):
+    def get_quota_by_services(self, service_list, child_data):
         """ Gets the quota applicable to the specified child
-        for the given resource
-
-        :param resource_name: name of the resource in the format
-                              <service-name>.<resouce-name>
-        :param child: details of the entity for which quota is requested.
-                      It should be a dictionary
-        """
-        return
-
-    def get_quota_multiple_resources(self, service_list, list_resource_lists,
-                                    child_data):
-        """ Gets the quota applicable to the specified child
-        for the given resources in the given services
+        for all the resources in the given services
 
         :param service_list: list of services
-        :param list_resource_lists: list of lists of resources for services in
-                                    service_list for which quota is requested
         :param child: details of the entity for which quota is requested.
                       It should be a dictionary
         """
-        return
+        if(type(service_list) is not list):
+            raise TypeError('service_list should be a list')
+        for service in service_list:
+            if(type(service) is not str):
+                raise TypeError('service names should be string')
+        session = self.get_session()
+        with session.begin():
+            quota_ids = self.__get_quota_ids_for_child(child_data,
+                                                       service_list,
+                                                       None,
+                                                       True)
+            ref = session.query(ResourcesModel.name, QuotasModel.ceiling)\
+                    .filter(QuotasModel.resource_id == ResourcesModel.id)\
+                    .filter(QuotasModel.id.in_(quota_ids))\
+                    .order_by(ResourcesModel.name)
+            result = ref.all()
+            service_list.sort()
+            service_dict = {}
+            for service in service_list:
+                resources_n_quotas = {}
+                for res in result:
+                    service_name = res.name.split('.')[0]
+                    resource_name = res.name.split('.')[1]
+                    if (str(service_name) == service):
+                        resources_n_quotas[str(resource_name)] = res.ceiling
+                service_dict[service] = resources_n_quotas
 
-    def update_quota(self, resource_name, child_data, ceiling_to_update_to,
-                     parent_data):
-        """ Updates the quota applicable to the specified child
-        for the given resource
+            obj_to_return = QuotaSetModel()
+            obj_to_return.child_data = child_data
+            obj_to_return.service_dict = service_dict
+        return obj_to_return
 
-        :param resource_name: name of the resource in the format
-                              <service-name>.<resouce-name>
-        :param child: details of the entity for which quota is to be updated.
-                      It should be a dictionary
-        :param ceiling_to_update_to: value of the quota to update to.
-        :param parent_data: details of the entity calling this method.
-                            It should be a dictionary and should exactly match
-                            the parent_data already present in the db.
-        """
-        return
-
-    def delete_quota(self, resource_name, child_data, parent_data):
+    def delete_quota(self, service_list, child_data, parent_data, deleted_by):
         """ Deletes the quota applicable to the specified child
-        for the given resource.
+        for all the resources in the mentioned services
 
-        :param resource_name: name of the resource in the format
-                              <service-name>.<resouce-name>
+        :param service_list: list of services
         :param child: details of the entity for which quota is to be deleted.
                       It should be a dictionary
         :param parent_data: details of the entity calling this method.
-                            It should be a dictionary and should exactly match
+                            It should be a dictionary and should match
                             the parent_data already present in the db.
         """
-        return
+        if(type(service_list) is not list):
+            raise TypeError('service_list should be a list')
+        for service in service_list:
+            if(type(service) is not str):
+                raise TypeError('service names should be string')
+        if (type(deleted_by) is not dict):
+            raise TypeError(('deleted_by should be a dictionary'))
+
+        quota_values_to_be_deleted = self.get_quota_by_services(service_list,
+                                                                child_data)
+        session = self.get_session()
+        with session.begin():
+            quota_ids = self.__get_quota_ids_for_child(child_data,
+                                                       service_list,
+                                                       None,
+                                                       True)
+            for quota_id in quota_ids:
+                session.query(QuotasModel)\
+                    .filter_by(id=quota_id)\
+                    .update({"closed_at": datetime.datetime.now(),
+                             "closed_by": cPickle.dumps(deleted_by)})
+        session.commit()
+        return quota_values_to_be_deleted

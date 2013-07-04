@@ -22,6 +22,7 @@ from sqlalchemy import or_
 from sqlalchemy import and_
 import sqlalchemy.sql.expression as expression
 from sqlalchemy import func
+import re
 
 
 class ResourcesModel(sql.ModelBase):
@@ -266,9 +267,9 @@ class Quotas(sql.Base):
             raise TypeError(('created_by should be a dictionary'))
         if(type(resource_name) is not str):
             raise TypeError(('resource_name should be a string'))
-        service_resource_split = resource_name.split('.')
-        if (len(service_resource_split) != 2):  # TODO Regex Check
+        if (re.match(r'^[a-z0-9]+\.[a-z0-9]+$', resource_name, re.M | re.I)):
             raise ValueError('resource_name is not correctly formatted')
+        service_resource_split = resource_name.split('.')
         service = service_resource_split[0]
         resource = service_resource_split[1]
 
@@ -427,3 +428,113 @@ class Quotas(sql.Base):
                              "closed_by": cPickle.dumps(deleted_by)})
         session.commit()
         return quota_values_to_be_deleted
+
+    def set_domain_quota(self, resource_name, ceiling, domain_id, region_name,
+                         parent_data, created_by, remark=None,
+                         update_if_exist=True):
+        if(type(parent_data) is not dict):
+            raise TypeError(('parent_data should be a dictionary'))
+        if(type(created_by) is not dict):
+            raise TypeError(('created_by should be a dictionary'))
+        if(type(resource_name) is not str):
+            raise TypeError(('resource_name should be a string'))
+        if(type(domain_id) is not str):
+            raise TypeError(('domain_id should be a string'))
+        if(type(region_name) is not str):
+            raise TypeError(('region_name should be a string'))
+        if (re.match(r'^[A-Za-z0-9]+\.[A-Za-z0-9]+$', resource_name, re.M)):
+            raise ValueError('resource_name is not correctly formatted')
+        # expecting that domain-ids follow uuid4 pattern
+        regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
+        '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
+        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+            raise ValueError('domain-id is not correctly formatted')
+        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+            raise ValueError('region_name is not correctly formatted')
+
+        child_data = {}
+        child_data["domain-id"] = domain_id
+        child_data["region"] = region_name
+
+        return self.set_quota(resource_name, ceiling, child_data, parent_data,
+                              created_by, remark, update_if_exist)
+
+    def delete_domain_quota(self, service_list, domain_id, region_name,
+                            parent_data, deleted_by):
+        """ Deletes the domain quota applicable to the specified region
+        within the specified domain for all the resources
+        in the mentioned services
+
+        :param service_list: list of services
+        :param domain_id: domain-id of the domain
+                          for which quota is to be deleted
+        :param region_name: name of the region with the mentioned domain-id
+                            for which quota is to be deleted
+        :param parent_data: details of the entity calling this method.
+                            It should be a dictionary and should match
+                            the parent_data already present in the db.
+        """
+        if(type(service_list) is not list):
+            raise TypeError('service_list should be a list')
+        for service in service_list:
+            if(type(service) is not str):
+                raise TypeError('service names should be string')
+            if (re.match(r'^[a-z0-9]+$', service, re.M | re.I)):
+                raise ValueError('service ' + service +\
+                                 ' is not correctly formatted')
+        if (type(deleted_by) is not dict):
+            raise TypeError(('deleted_by should be a dictionary'))
+        if(type(domain_id) is not str):
+            raise TypeError(('domain_id should be a string'))
+        if(type(region_name) is not str):
+            raise TypeError(('region_name should be a string'))
+        # expecting that domain-ids follow uuid4 pattern
+        regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
+        '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
+        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+            raise ValueError('domain-id is not correctly formatted')
+        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+            raise ValueError('region_name is not correctly formatted')
+
+        child_data = {}
+        child_data["domain-id"] = domain_id
+        child_data["region"] = region_name
+        return self.delete_quota(service_list, child_data,
+                                 parent_data, deleted_by)
+
+    def get_domain_quota_by_services(self, service_list,
+                                     domain_id, region_name):
+        """ Gets the domain quota applicable to the specified region
+        within the specified domain for all the resources
+        in the mentioned services
+
+        :param service_list: list of services
+        :param domain_id: domain-id of the domain
+                          for which quota is to be obtained
+        :param region_name: name of the region with the mentioned domain-id
+                            for which quota is to be obtained
+        """
+        if(type(service_list) is not list):
+            raise TypeError('service_list should be a list')
+        for service in service_list:
+            if(type(service) is not str):
+                raise TypeError('service names should be string')
+            if (re.match(r'^[a-z0-9]+$', service, re.M | re.I)):
+                raise ValueError('service ' + service +\
+                                 ' is not correctly formatted')
+        if(type(domain_id) is not str):
+            raise TypeError(('domain_id should be a string'))
+        if(type(region_name) is not str):
+            raise TypeError(('region_name should be a string'))
+        # expecting that domain-ids follow uuid4 pattern
+        regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
+        '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
+        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+            raise ValueError('domain-id is not correctly formatted')
+        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+            raise ValueError('region_name is not correctly formatted')
+
+        child_data = {}
+        child_data["domain-id"] = domain_id
+        child_data["region"] = region_name
+        return self.get_quota_by_services(service_list, child_data)

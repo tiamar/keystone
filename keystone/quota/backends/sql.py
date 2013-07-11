@@ -23,6 +23,7 @@ from sqlalchemy import and_
 import sqlalchemy.sql.expression as expression
 from sqlalchemy import func
 import re
+from operator import itemgetter
 
 
 class ResourcesModel(sql.ModelBase):
@@ -139,7 +140,7 @@ class Resources(sql.Base):
             if (len(result) == 0):
                 # i.e. resource is not registered
                 # so, register it!
-                ref = ResourcesModel(str(uuid.uuid4()),
+                ref = ResourcesModel(str(uuid.uuid4().hex),
                            resource_name,
                            cPickle.dumps(parameters),
                            cPickle.dumps(child_identity),
@@ -158,44 +159,80 @@ class Resources(sql.Base):
         """ De-registers (deletes) a resource in the quota manager.
             All the corresponding quotas are also deleted
         """
-
         return
 
     def update_resource(self, resource_name, parameters, child_identity,
                             resource_type, purge_quota_after):
-        """ Updates a resource related fields in the quota manager.
+        """ Updates resource related fields in the quota manager.
+        :param resource_name: Resource to be updated. It should be a string in
+                              the format <service-name>.<resouce-name>
+                              Eg. 'nova.instance'
+        :parameters: A list to be set as parameters for the given resource
+                     None means not to be updated
+        :child_identity: A list to be set as child_identity
+                         None means not to be updated
+        :resource_type: A string to be set as type of the resource
+                        None means not to be updated
+        :purge_quota_after: A numeric value to be set as purge_quota_after
+                            None means not to be updated
         """
-
         return
 
     def get_resource_details(self, resource_name):
         session = self.get_session()
-        ref = session.query(ResourcesModel)\
+        with session.begin():
+            ref = session.query(ResourcesModel)\
                          .filter(ResourcesModel.name == resource_name)\
                          .filter(ResourcesModel.closed_at == None)
-        result = ref.one()
-        resource_details = {}
-        resource_details["name"] = resource_name
-        resource_details["parameters"] = cPickle.loads(str(result.parameters))
-        resource_details["child_identity"] = cPickle\
+            result = ref.one()
+            resource_details = {}
+            resource_details["name"] = resource_name
+            resource_details["parameters"] = cPickle\
+                                             .loads(str(result.parameters))
+            resource_details["child_identity"] = cPickle\
                                              .loads(str(result.child_identity))
-        resource_details["resource_type"] = str(result.type)
-        resource_details["purge_quota_after"] = result.purge_quota_after
-        resource_details["created_at"] = result.created_at
-        resource_details["created_by"] = cPickle.loads(str(result.created_by))
-        return resource_details
+            resource_details["resource_type"] = str(result.type)
+            resource_details["purge_quota_after"] = result.purge_quota_after
+            resource_details["created_at"] = result.created_at
+            resource_details["created_by"] = cPickle\
+                                             .loads(str(result.created_by))
+            return resource_details
 
     def get_parameters(self, resource_name):
-        return
+        session = self.get_session()
+        with session.begin():
+            ref = session.query(ResourcesModel.parameters)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+            result = ref.one()
+            return cPickle.loads(str(result.parameters))
 
     def get_child_identity(self, resource_name):
-        return
+        session = self.get_session()
+        with session.begin():
+            ref = session.query(ResourcesModel.child_identity)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+            result = ref.one()
+            return cPickle.loads(str(result.child_identity))
 
     def get_resource_type(self, resource_name):
-        return
+        session = self.get_session()
+        with session.begin():
+            ref = session.query(ResourcesModel.type)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+            result = ref.one()
+            return str(result.type)
 
     def get_purge_quota_after(self, resource_name):
-        return
+        session = self.get_session()
+        with session.begin():
+            ref = session.query(ResourcesModel.purge_quota_after)\
+                         .filter(ResourcesModel.name == resource_name)\
+                         .filter(ResourcesModel.closed_at == None)
+            result = ref.one()
+            return result.purge_quota_after
 
     def get_resource_list(self, service_name):
         """Returns list of resources registered with quota manager
@@ -257,6 +294,107 @@ class Quotas(sql.Base):
                 quota_id_list.append(str(res.quota_id))
         return quota_id_list
 
+    def __get_child_datas_quota_ids(self, partial_child_data, service,
+                                 resource=None,
+                                 get_only_query=False,
+                                 list_keys_only=None):
+        '''
+        :param list_keys_only: lists of keys whose only presence is to be
+                               searched and not the value
+                               If None, then quota_ids will be found for child
+                               having key-values as provided in the given
+                               partial_child_data but the child can have keys
+                               more than present in given partial_child_data
+        '''
+        if(type(partial_child_data) is not dict):
+            raise TypeError('partial_child_data should be a dictionary')
+        if((type(service) is not str) & (type(service) is not list)):
+            raise TypeError('service should be either string or list')
+        if((list_keys_only is not None) & (type(list_keys_only) is not list)):
+            raise TypeError('list_keys_only should be a list')
+        child_data_copy = dict(partial_child_data)
+        if (list_keys_only is not None):
+            for key in child_data_copy.keys():
+                if (key in list_keys_only):
+                    del child_data_copy[key]
+        session = self.get_session()
+        with session.begin():
+            key_value_match = []
+            for key in child_data_copy:
+                key_value_match.append(expression.\
+                    and_(ChildFieldDataModel.key == key,
+                        ChildFieldDataModel.value == child_data_copy[key]))
+            if (list_keys_only is not None):
+                for key in list_keys_only:
+                    key_value_match.append(expression.\
+                                    and_(ChildFieldDataModel.key == key))
+            count = len(key_value_match)
+            resource_match = []
+            if (resource is None):
+                if (type(service) is str):
+                    resource_match.append(ResourcesModel.name.like
+                                          (service + ".%"))
+                else:
+                    for one_service in service:
+                        resource_match.append(ResourcesModel.name.like
+                                              (one_service + ".%"))
+            else:
+                resource_match.append(ResourcesModel.name ==
+                                      (service + "." + resource))
+
+            subquery1 = session.query(ChildFieldDataModel.quota_id).filter(and_
+                        (ChildFieldDataModel.quota_id == QuotasModel.id,
+                        QuotasModel.resource_id == ResourcesModel.id))\
+                        .filter(or_(*resource_match))\
+                        .filter(QuotasModel.closed_at == None)\
+                        .filter(ResourcesModel.closed_at == None)\
+
+            if (count != 0):
+                subquery1 = subquery1.filter(or_(*key_value_match))
+
+            subquery1 = subquery1.group_by(ChildFieldDataModel.quota_id)
+
+            if (count != 0):
+                subquery1 = subquery1.having(func.count(ChildFieldDataModel\
+                                                        .quota_id) == count)
+
+            subquery2 = session.query(ChildFieldDataModel.quota_id)\
+                        .filter(ChildFieldDataModel.quota_id.in_(subquery1))\
+                        .group_by(ChildFieldDataModel.quota_id)\
+                        .having(func.count(ChildFieldDataModel.quota_id)\
+                               == count)
+            query = session.query(ChildFieldDataModel.quota_id,
+                                      ChildFieldDataModel.key,
+                                      ChildFieldDataModel.value)
+            if (list_keys_only is not None):
+                query = query.filter(ChildFieldDataModel\
+                                     .quota_id.in_(subquery2))
+            else:
+                query = query.filter(ChildFieldDataModel\
+                                     .quota_id.in_(subquery1))
+            query = query.order_by(ChildFieldDataModel.quota_id)
+
+            if (get_only_query):
+                return query
+            result = query.all()
+            quota_id_list = []
+            child_data_list = []
+            child_data_dict = None
+            quota_id = ""
+            for res in result:
+                if (str(res.quota_id) != quota_id):
+                    quota_id = str(res.quota_id)
+                    if (child_data_dict is not None):
+                        child_data_list.append(child_data_dict)
+                    child_data_dict = {}
+                    quota_id_list.append(str(res.quota_id))
+                    child_data_dict[str(res.key)] = str(res.value)
+                else:
+                    child_data_dict[str(res.key)] = str(res.value)
+            if (child_data_dict is not None):
+                child_data_list.append(child_data_dict)
+        return [quota_id_list, child_data_list]
+
     def set_quota(self, resource_name, ceiling, child_data, parent_data,
                    created_by, remark=None, update_if_exist=True):
         if(type(child_data) is not dict):
@@ -267,7 +405,7 @@ class Quotas(sql.Base):
             raise TypeError(('created_by should be a dictionary'))
         if(type(resource_name) is not str):
             raise TypeError(('resource_name should be a string'))
-        if (re.match(r'^[a-z0-9]+\.[a-z0-9]+$', resource_name, re.M | re.I)):
+        if (not re.match(r'^[a-z0-9]+\.[a-z0-9]+$', resource_name, re.I)):
             raise ValueError('resource_name is not correctly formatted')
         service_resource_split = resource_name.split('.')
         service = service_resource_split[0]
@@ -311,7 +449,7 @@ class Quotas(sql.Base):
                     .filter(id == quota_ids[0])\
                     .update({"ceiling": ceiling})
                     # Create a history record for the same
-                    ref = HistoryQuotasModel(str(uuid.uuid4()),
+                    ref = HistoryQuotasModel(str(uuid.uuid4().hex),
                               quota_id=quota_ids[0],
                               updated_at=datetime.datetime.now(),
                               updated_by=cPickle.dumps(created_by),
@@ -327,7 +465,7 @@ class Quotas(sql.Base):
                         .one()
                 resource_id = result.id
 
-                refQ = QuotasModel(str(uuid.uuid4()),
+                refQ = QuotasModel(str(uuid.uuid4().hex),
                            resource_id=resource_id,
                            ceiling=ceiling,
                            available=-1,
@@ -337,14 +475,14 @@ class Quotas(sql.Base):
                 quota_id = refQ.id
 
                 for key in child_data:
-                    refC = ChildFieldDataModel(id=str(uuid.uuid4()),
+                    refC = ChildFieldDataModel(id=str(uuid.uuid4().hex),
                                         quota_id=quota_id,
                                         key=key,
                                         value=child_data[key])
                     session.add(refC)
 
                 for key in parent_data:
-                    refC = ParentFieldDataModel(id=str(uuid.uuid4()),
+                    refC = ParentFieldDataModel(id=str(uuid.uuid4().hex),
                                         quota_id=quota_id,
                                         key=key,
                                         value=parent_data[key])
@@ -442,14 +580,14 @@ class Quotas(sql.Base):
             raise TypeError(('domain_id should be a string'))
         if(type(region_name) is not str):
             raise TypeError(('region_name should be a string'))
-        if (re.match(r'^[A-Za-z0-9]+\.[A-Za-z0-9]+$', resource_name, re.M)):
+        if (not re.match(r'^[a-z0-9]+\.[a-z0-9]+$', resource_name, re.I)):
             raise ValueError('resource_name is not correctly formatted')
         # expecting that domain-ids follow uuid4 pattern
         regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
         '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
-        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+        if (not re.match(regex_for_uuid4, domain_id, re.I)):
             raise ValueError('domain-id is not correctly formatted')
-        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+        if (not re.match(r'^[a-z0-9]+$', region_name, re.I)):
             raise ValueError('region_name is not correctly formatted')
 
         child_data = {}
@@ -479,7 +617,7 @@ class Quotas(sql.Base):
         for service in service_list:
             if(type(service) is not str):
                 raise TypeError('service names should be string')
-            if (re.match(r'^[a-z0-9]+$', service, re.M | re.I)):
+            if (not re.match(r'^[a-z0-9]+$', service, re.I)):
                 raise ValueError('service ' + service +\
                                  ' is not correctly formatted')
         if (type(deleted_by) is not dict):
@@ -491,9 +629,9 @@ class Quotas(sql.Base):
         # expecting that domain-ids follow uuid4 pattern
         regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
         '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
-        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+        if (not re.match(regex_for_uuid4, domain_id, re.I)):
             raise ValueError('domain-id is not correctly formatted')
-        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+        if (not re.match(r'^[a-z0-9]+$', region_name, re.I)):
             raise ValueError('region_name is not correctly formatted')
 
         child_data = {}
@@ -519,7 +657,7 @@ class Quotas(sql.Base):
         for service in service_list:
             if(type(service) is not str):
                 raise TypeError('service names should be string')
-            if (re.match(r'^[a-z0-9]+$', service, re.M | re.I)):
+            if (not re.match(r'^[a-z0-9]+$', service, re.I)):
                 raise ValueError('service ' + service +\
                                  ' is not correctly formatted')
         if(type(domain_id) is not str):
@@ -529,12 +667,91 @@ class Quotas(sql.Base):
         # expecting that domain-ids follow uuid4 pattern
         regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
         '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
-        if (re.match(regex_for_uuid4, domain_id, re.M | re.I)):
+        if (not re.match(regex_for_uuid4, domain_id, re.I)):
             raise ValueError('domain-id is not correctly formatted')
-        if (re.match(r'^[a-z0-9]+$', region_name, re.M | re.I)):
+        if (not re.match(r'^[a-z0-9]+$', region_name, re.I)):
             raise ValueError('region_name is not correctly formatted')
 
         child_data = {}
         child_data["domain-id"] = domain_id
         child_data["region"] = region_name
         return self.get_quota_by_services(service_list, child_data)
+
+    def get_domain_quota_all_regions_by_services(self, service_list,
+                                                 domain_id):
+        """ Gets the domain quota applicable to all the regions
+        within the specified domain for all the resources
+        in the mentioned services
+
+        :param service_list: list of services
+        :param domain_id: domain-id of the domain
+                          for which quota is to be obtained
+        """
+        if(type(service_list) is not list):
+            raise TypeError('service_list should be a list')
+        for service in service_list:
+            if(type(service) is not str):
+                raise TypeError('service names should be string')
+            if (not re.match(r'^[a-z0-9]+$', service, re.I)):
+                raise ValueError('service ' + service +\
+                                 ' is not correctly formatted')
+        if(type(domain_id) is not str):
+            raise TypeError(('domain_id should be a string'))
+        # expecting that domain-ids follow uuid4 pattern
+        regex_for_uuid4 = r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
+        '[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
+        if (not re.match(regex_for_uuid4, domain_id, re.I)):
+            raise ValueError('domain-id is not correctly formatted')
+        partial_child_data = {}
+        partial_child_data["domain-id"] = domain_id
+
+        list_keys_only = ['region']
+
+        quota_ids_child_data_list = self.__get_child_datas_quota_ids(
+                                             partial_child_data, service_list,
+                                             None, False,
+                                             list_keys_only)
+        quota_ids = quota_ids_child_data_list[0]
+        child_data_list = quota_ids_child_data_list[1]
+        session = self.get_session()
+        with session.begin():
+            ref = session.query(ResourcesModel.name, QuotasModel.ceiling,
+                                QuotasModel.id)\
+                    .filter(QuotasModel.resource_id == ResourcesModel.id)\
+                    .filter(QuotasModel.id.in_(quota_ids))\
+                    .order_by(ResourcesModel.name)
+            result = ref.all()
+
+            service_list.sort()
+
+            unique_child_list = []
+            for x in child_data_list:
+                if x not in unique_child_list:
+                    unique_child_list.append(x)
+
+            unique_child_list = sorted(unique_child_list,
+                                       key=itemgetter('domain-id', 'region'))
+            list_to_return = []
+            for one_child in unique_child_list:
+                service_dict = {}
+                for service in service_list:
+                    resources_n_quotas = {}
+                    print service, one_child
+                    for (quota_id, child_data) in zip(quota_ids,
+                                                      child_data_list):
+                        if (one_child == child_data):
+                            for res in result:
+                                if (res.id == quota_id):
+                                    service_name = res.name.split('.')[0]
+                                    resource_name = res.name.split('.')[1]
+                                    if (str(service_name) == service):
+                                        resources_n_quotas[str(resource_name)]\
+                                        = res.ceiling
+                                        print service, resources_n_quotas
+                    print service, resources_n_quotas
+                    service_dict[service] = resources_n_quotas
+                one_obj_to_return = []
+                one_obj_to_return.append(one_child)
+                one_obj_to_return.append(service_dict)
+                list_to_return.append(one_obj_to_return)
+            return list_to_return
